@@ -227,3 +227,7 @@ annotated_scan.jpg
 legonet_dual.pth
 rebrickable.db
 inventory.db
+/detector_dataset
+/models
+/weights
+yolov8n.pt
