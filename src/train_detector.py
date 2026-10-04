@@ -219,12 +219,12 @@ class GPUSceneSynthesizer:
                 if (idx + 1) % 50 == 0 or (idx + 1) == count:
                     print(f" -> Processed {idx + 1}/{count} frames on CUDA...")
 
-        yaml_path = os.path.join(YOLO_DATA_DIR, "lego_detector.yaml")
+        yaml_path = os.path.join(YOLO_DATA_DIR, "Brick_detector.yaml")
         with open(yaml_path, "w", encoding="utf-8") as f:
             f.write(f"path: {os.path.abspath(YOLO_DATA_DIR)}\n")
             f.write("train: images/train\n")
             f.write("val: images/val\n")
-            f.write("names:\n  0: lego_piece\n")
+            f.write("names:\n  0: Brick_piece\n")
 
         print(f"[READY] Synthetic dataset written to '{YOLO_DATA_DIR}'.")
         return yaml_path
@@ -241,7 +241,7 @@ def train_yolo_localizer(yaml_path: str, epochs: int = 25) -> str:
         str - Path to best checkpoint weights.
     """
     os.makedirs(MODEL_OUT_DIR, exist_ok=True)
-    out_weights = os.path.join(MODEL_OUT_DIR, "lego_detector.pt")
+    out_weights = os.path.join(MODEL_OUT_DIR, "Brick_detector.pt")
 
     print(f"\n[TRAIN] Launching YOLOv8n detector training on GPU for {epochs} epochs...")
     model = YOLO("yolov8n.pt")
@@ -254,10 +254,10 @@ def train_yolo_localizer(yaml_path: str, epochs: int = 25) -> str:
         device=0 if torch.cuda.is_available() else "cpu",
         workers=2,
         project=MODEL_OUT_DIR,
-        name="run_yolo_lego"
+        name="run_yolo_Brick"
     )
 
-    best_pt = os.path.join(MODEL_OUT_DIR, "run_yolo_lego", "weights", "best.pt")
+    best_pt = os.path.join(MODEL_OUT_DIR, "run_yolo_Brick", "weights", "best.pt")
     if os.path.isfile(best_pt):
         shutil.copy(best_pt, out_weights)
         print(f"[DONE] Best weights successfully saved to '{out_weights}'.")

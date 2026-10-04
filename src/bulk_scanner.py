@@ -6,12 +6,12 @@ import torch
 from torchvision import transforms
 from PIL import Image
 
-from model import LegoNetDual
+from model import BrickNetDual
 from db import RebrickableOfflineDB
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-DEFAULT_MODEL_PATH = os.path.join(ROOT_DIR, "legonet_dual.pth")
-DEFAULT_DETECTOR_PATH = os.path.join(ROOT_DIR, "models", "lego_detector.pt")
+DEFAULT_MODEL_PATH = os.path.join(ROOT_DIR, "Bricknet_dual.pth")
+DEFAULT_DETECTOR_PATH = os.path.join(ROOT_DIR, "models", "Brick_detector.pt")
 DEFAULT_INVENTORY_DB = os.path.join(ROOT_DIR, "inventory.db")
 DEFAULT_TRAINING_DIR = os.path.join(ROOT_DIR, "training_data")
 
@@ -37,9 +37,9 @@ def letterbox_crop_image(image: Image.Image, target_size: int = 224) -> Image.Im
     return canvas
 
 
-class BulkLegoScanner:
+class BulkBrickScanner:
     """
-    Bulk LEGO piece localizer and dual-head classifier.
+    Bulk Brick piece localizer and dual-head classifier.
     Combines YOLOv8 object detection with Marker-Controlled Watershed fallback
     and color-assisted bounding box disentanglement for adjacent/touching parts.
     """
@@ -54,7 +54,7 @@ class BulkLegoScanner:
         Initializes the model architecture, YOLO localizer, and database interfaces.
 
         @parameters:
-            @param model_path: str - Path to the trained LegoNetDual classifier weights.
+            @param model_path: str - Path to the trained BrickNetDual classifier weights.
             @param detector_path: str - Path to trained YOLOv8 piece localizer weights.
             @param inventory_db_path: str - Path to inventory SQLite file.
         @returns:
@@ -76,7 +76,7 @@ class BulkLegoScanner:
             self.part_classes = checkpoint["part_classes"]
             self.color_classes = checkpoint["color_classes"]
 
-            self.model = LegoNetDual(
+            self.model = BrickNetDual(
                 num_parts=len(self.part_classes),
                 num_colors=len(self.color_classes)
             ).to(self.device)
@@ -86,8 +86,8 @@ class BulkLegoScanner:
         self.yolo_detector = None
         possible_detector_paths = [
             detector_path,
-            os.path.join(ROOT_DIR, "models", "lego_detector.pt"),
-            os.path.join(ROOT_DIR, "models", "run_yolo_lego", "weights", "best.pt")
+            os.path.join(ROOT_DIR, "models", "Brick_detector.pt"),
+            os.path.join(ROOT_DIR, "models", "run_yolo_Brick", "weights", "best.pt")
         ]
 
         for p in possible_detector_paths:
@@ -293,7 +293,7 @@ class BulkLegoScanner:
             iou_thresh: float = 0.65
     ) -> list[tuple[int, int, int, int]]:
         """
-        Segments physical LEGO pieces with area bounds and color disentanglement.
+        Segments physical Brick pieces with area bounds and color disentanglement.
 
         @parameters:
             @param img: np.ndarray - Source BGR image.
@@ -566,5 +566,5 @@ class BulkLegoScanner:
 
 
 if __name__ == "__main__":
-    scanner = BulkLegoScanner()
+    scanner = BulkBrickScanner()
     scanner.process_tray_image(os.path.join(ROOT_DIR, "tray_sample.jpg"))

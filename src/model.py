@@ -102,7 +102,7 @@ class FocalLoss(nn.Module):
         return loss.sum()
 
 
-class LegoNetDual(nn.Module):
+class BrickNetDual(nn.Module):
     """
     Decoupled dual-head neural network using pretrained EfficientNet-B0 for
     metric part identification and an independent chromatic analyzer for plastic colors.
@@ -119,7 +119,7 @@ class LegoNetDual(nn.Module):
         @returns:
             None
         """
-        super(LegoNetDual, self).__init__()
+        super(BrickNetDual, self).__init__()
         weights = models.EfficientNet_B0_Weights.DEFAULT
         base_model = models.efficientnet_b0(weights=weights)
         self.geo_backbone = base_model.features

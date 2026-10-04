@@ -224,7 +224,7 @@ __marimo__/
 /.idea
 /.idea
 annotated_scan.jpg
-legonet_dual.pth
+Bricknet_dual.pth
 rebrickable.db
 inventory.db
 /detector_dataset

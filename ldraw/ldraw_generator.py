@@ -93,26 +93,38 @@ def render_single_part_job(
         render_res: int = 256,
         cnn_size: int = 224
 ) -> int:
+    """
+    Renders rotating 3D turntable samples scaled to 224x224 with studio lighting.
+
+    @parameters:
+        @param part_num: str - Target Brick design number.
+        @param color_name: str - Name of the color class.
+        @param rgb_hex: str - Hexadecimal RGB string.
+        @param output_root: str - Destination root folder.
+        @param ldview_bin: str - Executable path for LDView.
+        @param library_dir: str - LDraw library root directory.
+        @param rotations: int - Number of rotation steps across 360 degrees.
+        @param tilt_x: float - X-axis tilt in degrees to reveal studs and thickness.
+        @param render_res: int - Render snapshot resolution.
+        @param cnn_size: int - Final output square dimension in pixels (224).
+    @returns:
+        int - Count of generated images.
+    """
     clean_color = "".join(c for c in color_name if c.isalnum() or c in ("-", "_")).strip()
     target_folder = os.path.join(output_root, f"{part_num}_{clean_color}")
-
-    if os.path.exists(target_folder) and len(os.listdir(target_folder)) >= rotations:
-        return 0
 
     os.makedirs(target_folder, exist_ok=True)
     hex_clean = (rgb_hex or "808080").lstrip("#").upper()
 
-    # Sötét színek korrekciója: fekete esetén grafit tónusra emelés a kontraszt miatt
+    # Contrast compensation: prevent pure black plastic from collapsing into silhouettes
     r = int(hex_clean[0:2], 16) if len(hex_clean) >= 6 else 128
     g = int(hex_clean[2:4], 16) if len(hex_clean) >= 6 else 128
     b = int(hex_clean[4:6], 16) if len(hex_clean) >= 6 else 128
 
     if max(r, g, b) < 50:
-        # Reális stúdió-megvilágítású fekete műanyag tónus
         hex_clean = "2E3137"
 
     direct_color = f"0x2{hex_clean}"
-
     step_angle = 360.0 / rotations
     generated_count = 0
 
@@ -148,7 +160,6 @@ def render_single_part_job(
             "-OpenGL=1",
             "-FSAA=0",
             "-Quality=1",
-            # 3 pontos stúdióvilágítás derítéssel:
             "-Light1=1.0,1.0,1.0,0.6,-0.8,0.6",
             "-Light2=0.8,0.8,0.8,-0.6,-0.5,-0.4",
             "-Light3=0.6,0.6,0.6,0.0,0.8,-0.5",
@@ -194,7 +205,8 @@ def render_single_part_job(
 
 class GPULDrawBatchPipeline:
     """
-    Manages throttled GPU batch rendering with embedded matrix rotation and tilt for 224x224 targets.
+    Manages throttled GPU batch rendering with embedded matrix rotation and tilt.
+    Excludes already-generated parts and folders from the queue upfront.
     """
 
     def __init__(
@@ -225,10 +237,11 @@ class GPULDrawBatchPipeline:
             tilt_x: float = 22.5,
             render_res: int = 256,
             cnn_size: int = 224,
-            max_elements: int | None = None
+            max_elements: int | None = None,
+            exclude_existing_part_ids: bool = False
     ) -> None:
         """
-        Executes hardware batch rendering sorted by total inventory quantity descending.
+        Executes batch rendering sorted by quantity, skipping elements that already have folders.
 
         @parameters:
             @param rotations_per_part: int - Number of rotation views per element.
@@ -236,17 +249,36 @@ class GPULDrawBatchPipeline:
             @param render_res: int - Render snapshot resolution.
             @param cnn_size: int - Final output image square size (224).
             @param max_elements: int | None - Cap on total parts processed.
+            @param exclude_existing_part_ids: bool - If True, skips a part_num if ANY folder
+                                                     for that part_num already exists.
+                                                     If False, only skips if the specific
+                                                     part_num + color folder already exists.
         @returns:
             None
         """
-        print(
-            f"[INIT] Launching pipeline with {self.max_workers} worker processes (Output Resolution: {cnn_size}x{cnn_size})...")
+        print(f"[INIT] Scanning destination folder '{self.output_dir}' for existing data...")
+
+        existing_folders = set()
+        existing_part_ids = set()
+
+        if os.path.exists(self.output_dir):
+            for d in os.listdir(self.output_dir):
+                full_d = os.path.join(self.output_dir, d)
+                if os.path.isdir(full_d):
+                    # Check that the folder actually contains rendered images
+                    images = [f for f in os.listdir(full_d) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+                    if len(images) >= rotations_per_part:
+                        existing_folders.add(d)
+                        if "_" in d:
+                            existing_part_ids.add(d.split("_")[0])
+
+        print(f"[CACHE] Found {len(existing_folders)} completed folders ({len(existing_part_ids)} unique part IDs).")
+
         query = """
                 SELECT ip.part_num, c.name, c.rgb, SUM(ip.quantity) AS total_count
                 FROM inventory_parts ip
                          JOIN colors c ON ip.color_id = c.id
-                WHERE c.rgb IS NOT NULL \
-                  AND c.rgb != ''
+                WHERE c.rgb IS NOT NULL AND c.rgb != ''
                 GROUP BY ip.part_num, c.name
                 ORDER BY total_count DESC, ip.part_num ASC; \
                 """
@@ -254,22 +286,42 @@ class GPULDrawBatchPipeline:
         with self.reb_db.get_connection() as conn:
             rows = conn.execute(query).fetchall()
 
-        if max_elements is not None:
-            rows = rows[:max_elements]
-
         parts_dir = os.path.join(self.library_dir, "parts")
         tasks = []
+        skipped_count = 0
 
         for row in rows:
-            part_num = row[0]
-            color_name = row[1]
+            part_num = str(row[0])
+            color_name = str(row[1])
             rgb_hex = row[2]
             total_count = row[3]
+
+            clean_color = "".join(c for c in color_name if c.isalnum() or c in ("-", "_")).strip()
+            folder_name = f"{part_num}_{clean_color}"
+
+            if exclude_existing_part_ids and part_num in existing_part_ids:
+                skipped_count += 1
+                continue
+
+            if folder_name in existing_folders:
+                skipped_count += 1
+                continue
+
             part_path = os.path.join(parts_dir, f"{part_num}.dat")
             if os.path.isfile(part_path):
                 tasks.append((part_num, color_name, rgb_hex, total_count))
+                if exclude_existing_part_ids:
+                    existing_part_ids.add(part_num)
 
-        print(f"[QUEUE] Loaded {len(tasks)} elements sorted by total production popularity.")
+            if max_elements is not None and len(tasks) >= max_elements:
+                break
+
+        print(f"[FILTER] Excluded {skipped_count} elements with existing folders.")
+        print(f"[QUEUE] Queued {len(tasks)} new elements for generation.")
+
+        if not tasks:
+            print("[DONE] All elements in catalog already have rendered folders. Nothing to do.")
+            return
 
         total_completed = 0
         with concurrent.futures.ProcessPoolExecutor(max_workers=self.max_workers) as executor:
@@ -295,19 +347,23 @@ class GPULDrawBatchPipeline:
                     count = future.result()
                     if count > 0:
                         total_completed += 1
-                        if total_completed % 5 == 0:
-                            print(f"[PROGRESS] Rendered {total_completed}/{len(tasks)} most common elements...")
+                        if total_completed % 5 == 0 or total_completed == len(tasks):
+                            print(f"[PROGRESS] Rendered {total_completed}/{len(tasks)} elements...")
                 except Exception as err:
                     print(f"[WORKER ERROR] {err}")
 
-        print(f"\n[DONE] Generation complete. 224x224 images saved in '{self.output_dir}'.")
+        print(f"\n[DONE] Generation complete. New images saved in '{self.output_dir}'.")
 
 
 if __name__ == "__main__":
     pipeline = GPULDrawBatchPipeline(max_workers=2)
+
+    # Set exclude_existing_part_ids=True if you want only 1 folder per part number
+    # Set exclude_existing_part_ids=False to allow multiple colors of the same part
     pipeline.run_gpu_batch(
         rotations_per_part=16,
         tilt_x=22.5,
         render_res=256,
-        cnn_size=224
+        cnn_size=224,
+        exclude_existing_part_ids=True
     )

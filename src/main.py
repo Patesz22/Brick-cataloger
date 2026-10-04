@@ -13,19 +13,19 @@ for path in (ROOT_DIR, SRC_DIR):
 
 import torch
 from db import RebrickableOfflineDB
-from bulk_scanner import BulkLegoScanner, DEFAULT_MODEL_PATH, DEFAULT_TRAINING_DIR
+from bulk_scanner import BulkBrickScanner, DEFAULT_MODEL_PATH, DEFAULT_TRAINING_DIR
 from train import execute_training
 
 
-class LegoCatalogerGUI(tk.Tk):
+class BrickCatalogerGUI(tk.Tk):
     """
-    Desktop Graphical User Interface for the LEGO AI Scanner & Inventory System.
+    Desktop Graphical User Interface for the Brick AI Scanner & Inventory System.
     """
 
     def __init__(self):
         super().__init__()
 
-        self.title("LEGO AI Scanner & Inventory System")
+        self.title("Brick AI Scanner & Inventory System")
         self.geometry("1280x820")
         self.minsize(1050, 680)
 
@@ -70,7 +70,7 @@ class LegoCatalogerGUI(tk.Tk):
         header = ttk.Frame(self, style="Header.TFrame", padding=(16, 12))
         header.pack(fill=tk.X, side=tk.TOP)
 
-        title_lbl = ttk.Label(header, text="LEGO AI Cataloger", style="HeaderTitle.TLabel")
+        title_lbl = ttk.Label(header, text="Brick AI Cataloger", style="HeaderTitle.TLabel")
         title_lbl.pack(side=tk.LEFT)
 
         self.device_lbl = ttk.Label(header, text="Device: Detecting...", style="HeaderSub.TLabel")
@@ -194,7 +194,7 @@ class LegoCatalogerGUI(tk.Tk):
     def on_select_image(self) -> None:
         """Prompts for an image using the native file picker dialog."""
         path = filedialog.askopenfilename(
-            title="Select Bulk LEGO Tray Photo",
+            title="Select Bulk Brick Tray Photo",
             filetypes=[
                 ("Image files", "*.jpg;*.jpeg;*.png;*.webp;*.bmp"),
                 ("JPEG files", "*.jpg;*.jpeg"),
@@ -229,7 +229,7 @@ class LegoCatalogerGUI(tk.Tk):
         def run_thread():
             try:
                 if self.scanner is None:
-                    self.scanner = BulkLegoScanner(model_path=DEFAULT_MODEL_PATH)
+                    self.scanner = BulkBrickScanner(model_path=DEFAULT_MODEL_PATH)
 
                 annotated_path, detections = self.scanner.process_tray_image(self.current_image_path)
                 self.after(0, lambda p=annotated_path, d=detections: self._on_scan_completed(p, d))
@@ -281,7 +281,7 @@ class LegoCatalogerGUI(tk.Tk):
         def run_thread():
             try:
                 if self.scanner is None:
-                    self.scanner = BulkLegoScanner(model_path=DEFAULT_MODEL_PATH)
+                    self.scanner = BulkBrickScanner(model_path=DEFAULT_MODEL_PATH)
 
                 count = self.scanner.harvest_tray_crops_for_training(
                     image_path=self.current_image_path,
@@ -341,5 +341,5 @@ class LegoCatalogerGUI(tk.Tk):
 
 
 if __name__ == "__main__":
-    app = LegoCatalogerGUI()
+    app = BrickCatalogerGUI()
     app.mainloop()
