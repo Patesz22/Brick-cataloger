@@ -1,7 +1,9 @@
 import os
 import sys
 import math
+import random
 import shutil
+import tempfile
 import subprocess
 import concurrent.futures
 import numpy as np
@@ -21,6 +23,47 @@ try:
     from db import RebrickableOfflineDB
 except ModuleNotFoundError:
     from src.db import RebrickableOfflineDB
+
+
+def configure_process_background_priority() -> None:
+    """
+    Sets the host process and all child workers to below-normal OS scheduling priority.
+
+    @parameters:
+        None
+    @returns:
+        None
+    """
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            below_normal_priority_class = 0x00004000
+            process_handle = ctypes.windll.kernel32.GetCurrentProcess()
+            ctypes.windll.kernel32.SetPriorityClass(process_handle, below_normal_priority_class)
+        except Exception:
+            pass
+
+
+def get_scratch_directory() -> str:
+    """
+    Identifies a high-speed RAM-disk or configures a persistent OS memory cache directory.
+
+    @parameters:
+        None
+    @returns:
+        str - Path to the ephemeral storage buffer.
+    """
+    env_ramdisk = os.environ.get("BRICK_RAMDISK")
+    if env_ramdisk and os.path.isdir(env_ramdisk):
+        return env_ramdisk
+
+    for candidate in [r"R:\render_scratch", r"B:\render_scratch", r"Z:\render_scratch"]:
+        if os.path.isdir(candidate):
+            return candidate
+
+    system_temp = os.path.join(tempfile.gettempdir(), "brick_render_scratch")
+    os.makedirs(system_temp, exist_ok=True)
+    return system_temp
 
 
 def locate_ldview_binary() -> str:
@@ -51,72 +94,143 @@ def locate_ldview_binary() -> str:
     )
 
 
-def compute_ldraw_matrix(yaw_deg: float, tilt_x_deg: float = 22.5) -> str:
+def compute_orthonormal_euler_matrix(pitch_x_deg: float, yaw_y_deg: float, roll_z_deg: float = 0.0) -> str:
     """
-    Computes a combined 3D rotation matrix for LDraw Line Type 1 definitions.
+    Derives an orthonormal 3x3 transformation matrix preserving triangle winding parity.
 
     @parameters:
-        @param yaw_deg: float - Turntable rotation around the vertical Y-axis in degrees.
-        @param tilt_x_deg: float - Downward elevation pitch tilt around the X-axis in degrees.
+        @param pitch_x_deg: float - Elevation tilt angle around the X axis in degrees.
+        @param yaw_y_deg: float - Turntable rotation angle around the Y axis in degrees.
+        @param roll_z_deg: float - In-plane rotation angle around the Z axis in degrees.
     @returns:
-        str - Space-delimited string of 9 matrix float values (a b c d e f g h i).
+        str - Space-delimited string of 9 matrix float values.
     """
-    theta = math.radians(yaw_deg)
-    phi = math.radians(tilt_x_deg)
-
-    r_y = np.array([
-        [math.cos(theta), 0.0, math.sin(theta)],
-        [0.0, 1.0, 0.0],
-        [-math.sin(theta), 0.0, math.cos(theta)]
-    ], dtype=np.float32)
+    rad_x = math.radians(pitch_x_deg)
+    rad_y = math.radians(yaw_y_deg)
+    rad_z = math.radians(roll_z_deg)
 
     r_x = np.array([
         [1.0, 0.0, 0.0],
-        [0.0, math.cos(phi), -math.sin(phi)],
-        [0.0, math.sin(phi), math.cos(phi)]
+        [0.0, math.cos(rad_x), -math.sin(rad_x)],
+        [0.0, math.sin(rad_x), math.cos(rad_x)]
     ], dtype=np.float32)
 
-    mat = np.dot(r_x, r_y)
+    r_y = np.array([
+        [math.cos(rad_y), 0.0, math.sin(rad_y)],
+        [0.0, 1.0, 0.0],
+        [-math.sin(rad_y), 0.0, math.cos(rad_y)]
+    ], dtype=np.float32)
+
+    r_z = np.array([
+        [math.cos(rad_z), -math.sin(rad_z), 0.0],
+        [math.sin(rad_z), math.cos(rad_z), 0.0],
+        [0.0, 0.0, 1.0]
+    ], dtype=np.float32)
+
+    mat = np.dot(r_z, np.dot(r_y, r_x))
     flat = mat.flatten()
     return " ".join(f"{val:.6f}" for val in flat)
 
 
-def render_single_part_job(
-        part_num: str,
-        color_name: str,
-        rgb_hex: str,
-        output_root: str,
-        ldview_bin: str,
-        library_dir: str,
-        rotations: int = 16,
-        tilt_x: float = 22.5,
-        render_res: int = 256,
-        cnn_size: int = 224
-) -> int:
+def sample_physical_pose(index: int, total_rotations: int) -> tuple[float, float, float]:
     """
-    Renders rotating 3D turntable samples scaled to 224x224 with studio lighting.
+    Distributes viewpoints across four distinct physical stable resting states:
+    lying flat on side (90 deg), upright (25 deg), inverted (160 deg), and tumble (55 deg).
 
     @parameters:
-        @param part_num: str - Target Brick design number.
-        @param color_name: str - Name of the color class.
-        @param rgb_hex: str - Hexadecimal RGB string.
-        @param output_root: str - Destination root folder.
-        @param ldview_bin: str - Executable path for LDView.
-        @param library_dir: str - LDraw library root directory.
-        @param rotations: int - Number of rotation steps across 360 degrees.
-        @param tilt_x: float - X-axis tilt in degrees to reveal studs and thickness.
-        @param render_res: int - Render snapshot resolution.
-        @param cnn_size: int - Final output square dimension in pixels (224).
+        @param index: int - Current orientation index.
+        @param total_rotations: int - Total target viewpoints.
     @returns:
-        int - Count of generated images.
+        tuple[float, float, float] - (pitch_x, yaw_y, roll_z) in degrees.
     """
+    slot = index % 4
+    step = (360.0 / max(1, total_rotations // 4)) * (index // 4)
+
+    if slot == 0:
+        return (90.0, step, 0.0)
+    elif slot == 1:
+        return (25.0, step, 0.0)
+    elif slot == 2:
+        return (160.0, step, 0.0)
+    else:
+        return (55.0, step, 30.0)
+
+
+def composite_clean_piece(png_path: str, cnn_size: int = 224) -> Image.Image | None:
+    """
+    Extracts the non-zero alpha bounding box and letterboxes the rendered piece.
+    Returns None if the render buffer is blank or fully transparent.
+
+    @parameters:
+        @param png_path: str - Path to rendered snapshot PNG.
+        @param cnn_size: int - Final output dimension in pixels.
+    @returns:
+        Image.Image | None - Composited image, or None if the buffer is empty.
+    """
+    try:
+        with Image.open(png_path) as src_img:
+            rgba = src_img.convert("RGBA")
+    except Exception:
+        return None
+
+    alpha_channel = rgba.split()[3]
+    extrema = alpha_channel.getextrema()
+    if extrema[1] == 0:
+        return None
+
+    bbox = rgba.getbbox()
+    if bbox is None:
+        return None
+
+    cropped = rgba.crop(bbox)
+
+    max_dim = cnn_size - 24
+    cropped.thumbnail((max_dim, max_dim), Image.Resampling.BILINEAR)
+
+    piece_w, piece_h = cropped.size
+    offset_x = (cnn_size - piece_w) // 2
+    offset_y = (cnn_size - piece_h) // 2
+
+    canvas = Image.new("RGB", (cnn_size, cnn_size), (255, 255, 255))
+    canvas.paste(cropped, (offset_x, offset_y), mask=cropped.split()[3])
+
+    return canvas
+
+
+def render_single_part_job(
+    part_num: str,
+    color_name: str,
+    rgb_hex: str,
+    output_root: str,
+    ldview_bin: str,
+    library_dir: str,
+    rotations: int = 16,
+    render_res: int = 256,
+    cnn_size: int = 224
+) -> int:
+    """
+    Renders multi-axis orientations using headless execution with alpha verification.
+
+    @parameters:
+        @param part_num: str - Target design identifier.
+        @param color_name: str - Color name.
+        @param rgb_hex: str - Hexadecimal color code.
+        @param output_root: str - Target directory.
+        @param ldview_bin: str - Path to LDView binary.
+        @param library_dir: str - LDraw library root directory.
+        @param rotations: int - Number of multi-axis orientations to generate.
+        @param render_res: int - LDView render buffer dimension.
+        @param cnn_size: int - Output dimension in pixels.
+    @returns:
+        int - Successfully written image count.
+    """
+    configure_process_background_priority()
+
     clean_color = "".join(c for c in color_name if c.isalnum() or c in ("-", "_")).strip()
     target_folder = os.path.join(output_root, f"{part_num}_{clean_color}")
-
     os.makedirs(target_folder, exist_ok=True)
-    hex_clean = (rgb_hex or "808080").lstrip("#").upper()
 
-    # Contrast compensation: prevent pure black plastic from collapsing into silhouettes
+    hex_clean = (rgb_hex or "808080").lstrip("#").upper()
     r = int(hex_clean[0:2], 16) if len(hex_clean) >= 6 else 128
     g = int(hex_clean[2:4], 16) if len(hex_clean) >= 6 else 128
     b = int(hex_clean[4:6], 16) if len(hex_clean) >= 6 else 128
@@ -125,20 +239,25 @@ def render_single_part_job(
         hex_clean = "2E3137"
 
     direct_color = f"0x2{hex_clean}"
-    step_angle = 360.0 / rotations
     generated_count = 0
+    scratch_dir = get_scratch_directory()
+    proc_id = os.getpid()
+
+    subprocess_flags = 0
+    if sys.platform == "win32":
+        subprocess_flags = 0x08000000 | 0x00004000
 
     for r_idx in range(rotations):
-        yaw = r_idx * step_angle
-        matrix_str = compute_ldraw_matrix(yaw_deg=yaw, tilt_x_deg=tilt_x)
+        pitch, yaw, roll = sample_physical_pose(r_idx, rotations)
+        matrix_str = compute_orthonormal_euler_matrix(pitch, yaw, roll)
 
-        temp_ldr = os.path.join(target_folder, f"_temp_{part_num}_{r_idx}.ldr")
-        temp_png = os.path.join(target_folder, f"_gpu_render_{r_idx}.png")
+        temp_ldr = os.path.join(scratch_dir, f"_buf_{proc_id}_{part_num}_{r_idx}.ldr")
+        temp_png = os.path.join(scratch_dir, f"_buf_{proc_id}_{part_num}_{r_idx}.png")
         final_jpg = os.path.join(target_folder, f"{part_num}_{clean_color}_rot_{r_idx}.jpg")
 
         ldr_content = (
             f"0 FILE {part_num}.ldr\n"
-            f"0 {part_num} in {color_name} rot {yaw:.1f}\n"
+            f"0 {part_num} {color_name} pose={r_idx}\n"
             f"1 {direct_color} 0 0 0 {matrix_str} {part_num}.dat\n"
             f"0 NOFILE\n"
         )
@@ -154,20 +273,20 @@ def render_single_part_job(
             f"-SaveWidth={render_res}",
             f"-SaveHeight={render_res}",
             "-SaveAlpha=1",
-            "-AutoCrop=1",
             "-DefaultAngles=1",
             "-FOV=30",
             "-OpenGL=1",
+            "-Quality=2",
+            "-HiResPrimitives=1",
             "-FSAA=0",
-            "-Quality=1",
-            "-Light1=1.0,1.0,1.0,0.6,-0.8,0.6",
-            "-Light2=0.8,0.8,0.8,-0.6,-0.5,-0.4",
-            "-Light3=0.6,0.6,0.6,0.0,0.8,-0.5",
-            "-Ambient=0.25",
-            "-Specular=1",
             "-EdgeLines=1",
             "-ConditionalLines=1",
-            "-LineThickness=1",
+            "-Specular=1",
+            "-SpecPower=32",
+            "-Ambient=0.30",
+            "-Light1=1.2,1.2,1.2,0.4,-0.9,0.5",
+            "-Light2=0.5,0.5,0.5,-0.6,-0.4,-0.4",
+            "-Light3=0.3,0.3,0.3,0.0,0.9,-0.6",
             "-ProcessEvents=0"
         ]
 
@@ -177,23 +296,15 @@ def render_single_part_job(
                 check=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                timeout=15
+                creationflags=subprocess_flags,
+                timeout=12
             )
             if os.path.isfile(temp_png):
-                with Image.open(temp_png) as img:
-                    rgba = img.convert("RGBA")
-                    canvas = Image.new("RGB", rgba.size, (255, 255, 255))
-                    canvas.paste(rgba, mask=rgba.split()[3])
-
-                    canvas.thumbnail((cnn_size - 16, cnn_size - 16), Image.Resampling.BILINEAR)
-                    final_canvas = Image.new("RGB", (cnn_size, cnn_size), (255, 255, 255))
-                    offset_x = (cnn_size - canvas.width) // 2
-                    offset_y = (cnn_size - canvas.height) // 2
-                    final_canvas.paste(canvas, (offset_x, offset_y))
-                    final_canvas.save(final_jpg, "JPEG", quality=92)
-
+                clean_img = composite_clean_piece(temp_png, cnn_size=cnn_size)
+                if clean_img is not None:
+                    clean_img.save(final_jpg, "JPEG", quality=95)
+                    generated_count += 1
                 os.remove(temp_png)
-                generated_count += 1
         except Exception:
             pass
 
@@ -205,23 +316,22 @@ def render_single_part_job(
 
 class GPULDrawBatchPipeline:
     """
-    Manages throttled GPU batch rendering with embedded matrix rotation and tilt.
-    Excludes already-generated parts and folders from the queue upfront.
+    Manages throttled GPU batch rendering with background scheduling and resource management.
     """
 
     def __init__(
-            self,
-            library_dir: str = LDRAW_LIBRARY_DIR,
-            output_dir: str = DEFAULT_TRAINING_DIR,
-            max_workers: int = 2
+        self,
+        library_dir: str = LDRAW_LIBRARY_DIR,
+        output_dir: str = DEFAULT_TRAINING_DIR,
+        max_workers: int = 4
     ):
         """
-        Initializes the rendering pipeline with safe worker limits.
+        Initializes the rendering pipeline with non-disruptive worker limits.
 
         @parameters:
-            @param library_dir: str - Local directory of the unpacked LDraw library.
+            @param library_dir: str - Local directory of the unpacked library.
             @param output_dir: str - Target root destination directory.
-            @param max_workers: int - Worker limit preventing GPU driver TDR timeouts.
+            @param max_workers: int - Background worker pool size.
         @returns:
             None
         """
@@ -230,29 +340,25 @@ class GPULDrawBatchPipeline:
         self.ldview_bin = locate_ldview_binary()
         self.reb_db = RebrickableOfflineDB()
         self.max_workers = max_workers
+        configure_process_background_priority()
 
     def run_gpu_batch(
-            self,
-            rotations_per_part: int = 16,
-            tilt_x: float = 22.5,
-            render_res: int = 256,
-            cnn_size: int = 224,
-            max_elements: int | None = None,
-            exclude_existing_part_ids: bool = False
+        self,
+        rotations_per_part: int = 16,
+        render_res: int = 256,
+        cnn_size: int = 224,
+        max_elements: int | None = None,
+        exclude_existing_part_ids: bool = False
     ) -> None:
         """
-        Executes batch rendering sorted by quantity, skipping elements that already have folders.
+        Executes batch rendering skipping elements that already have folders.
 
         @parameters:
-            @param rotations_per_part: int - Number of rotation views per element.
-            @param tilt_x: float - X-axis elevation tilt in degrees.
+            @param rotations_per_part: int - Number of multi-axis views per element.
             @param render_res: int - Render snapshot resolution.
-            @param cnn_size: int - Final output image square size (224).
+            @param cnn_size: int - Final output image square size.
             @param max_elements: int | None - Cap on total parts processed.
-            @param exclude_existing_part_ids: bool - If True, skips a part_num if ANY folder
-                                                     for that part_num already exists.
-                                                     If False, only skips if the specific
-                                                     part_num + color folder already exists.
+            @param exclude_existing_part_ids: bool - If True, keeps only one mold across colors.
         @returns:
             None
         """
@@ -265,7 +371,6 @@ class GPULDrawBatchPipeline:
             for d in os.listdir(self.output_dir):
                 full_d = os.path.join(self.output_dir, d)
                 if os.path.isdir(full_d):
-                    # Check that the folder actually contains rendered images
                     images = [f for f in os.listdir(full_d) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
                     if len(images) >= rotations_per_part:
                         existing_folders.add(d)
@@ -275,20 +380,23 @@ class GPULDrawBatchPipeline:
         print(f"[CACHE] Found {len(existing_folders)} completed folders ({len(existing_part_ids)} unique part IDs).")
 
         query = """
-                SELECT ip.part_num, c.name, c.rgb, SUM(ip.quantity) AS total_count
-                FROM inventory_parts ip
-                         JOIN colors c ON ip.color_id = c.id
-                WHERE c.rgb IS NOT NULL AND c.rgb != ''
-                GROUP BY ip.part_num, c.name
-                ORDER BY total_count DESC, ip.part_num ASC; \
-                """
+            SELECT ip.part_num, c.name, c.rgb, SUM(ip.quantity) AS total_count
+            FROM inventory_parts ip
+            JOIN colors c ON ip.color_id = c.id
+            WHERE c.rgb IS NOT NULL AND c.rgb != ''
+            GROUP BY ip.part_num, c.name
+            ORDER BY total_count DESC, ip.part_num ASC;
+        """
 
         with self.reb_db.get_connection() as conn:
             rows = conn.execute(query).fetchall()
 
         parts_dir = os.path.join(self.library_dir, "parts")
         tasks = []
-        skipped_count = 0
+        queued_part_ids = set(existing_part_ids)
+        disk_skipped = 0
+        color_dedup_skipped = 0
+        missing_dat_skipped = 0
 
         for row in rows:
             part_num = str(row[0])
@@ -299,28 +407,33 @@ class GPULDrawBatchPipeline:
             clean_color = "".join(c for c in color_name if c.isalnum() or c in ("-", "_")).strip()
             folder_name = f"{part_num}_{clean_color}"
 
-            if exclude_existing_part_ids and part_num in existing_part_ids:
-                skipped_count += 1
+            if folder_name in existing_folders:
+                disk_skipped += 1
                 continue
 
-            if folder_name in existing_folders:
-                skipped_count += 1
+            if exclude_existing_part_ids and part_num in queued_part_ids:
+                color_dedup_skipped += 1
                 continue
 
             part_path = os.path.join(parts_dir, f"{part_num}.dat")
-            if os.path.isfile(part_path):
-                tasks.append((part_num, color_name, rgb_hex, total_count))
-                if exclude_existing_part_ids:
-                    existing_part_ids.add(part_num)
+            if not os.path.isfile(part_path):
+                missing_dat_skipped += 1
+                continue
+
+            tasks.append((part_num, color_name, rgb_hex, total_count))
+            if exclude_existing_part_ids:
+                queued_part_ids.add(part_num)
 
             if max_elements is not None and len(tasks) >= max_elements:
                 break
 
-        print(f"[FILTER] Excluded {skipped_count} elements with existing folders.")
-        print(f"[QUEUE] Queued {len(tasks)} new elements for generation.")
+        print(f"[FILTER] Skipped on disk: {disk_skipped}")
+        print(f"[FILTER] Deduplicated colors: {color_dedup_skipped}")
+        print(f"[FILTER] Missing geometry .dat: {missing_dat_skipped}")
+        print(f"[QUEUE] Queued {len(tasks)} unique pieces for generation.")
 
         if not tasks:
-            print("[DONE] All elements in catalog already have rendered folders. Nothing to do.")
+            print("[DONE] All elements in catalog already have rendered folders.")
             return
 
         total_completed = 0
@@ -335,7 +448,6 @@ class GPULDrawBatchPipeline:
                     self.ldview_bin,
                     self.library_dir,
                     rotations_per_part,
-                    tilt_x,
                     render_res,
                     cnn_size
                 )
@@ -352,17 +464,13 @@ class GPULDrawBatchPipeline:
                 except Exception as err:
                     print(f"[WORKER ERROR] {err}")
 
-        print(f"\n[DONE] Generation complete. New images saved in '{self.output_dir}'.")
+        print(f"\n[DONE] Generation complete. Clean renders saved in '{self.output_dir}'.")
 
 
 if __name__ == "__main__":
-    pipeline = GPULDrawBatchPipeline(max_workers=2)
-
-    # Set exclude_existing_part_ids=True if you want only 1 folder per part number
-    # Set exclude_existing_part_ids=False to allow multiple colors of the same part
+    pipeline = GPULDrawBatchPipeline(max_workers=4)
     pipeline.run_gpu_batch(
         rotations_per_part=16,
-        tilt_x=22.5,
         render_res=256,
         cnn_size=224,
         exclude_existing_part_ids=True
